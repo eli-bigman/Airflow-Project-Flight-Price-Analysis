@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments
+.env
+
+# Data
+data/input/*
+data/output/*
+!data/input/.gitkeep
+
+# Local Logs
+logs/
+
+# IDEs
+.vscode/
+.idea/
+
+# md file 
+*.md
+!README.md
+!docs/*.md
+
