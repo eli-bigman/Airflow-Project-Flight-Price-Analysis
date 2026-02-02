@@ -1,0 +1,6 @@
+apache-airflow-providers-mysql
+apache-airflow-providers-postgres
+pandas
+sqlalchemy
+mysql-connector-python
+psycopg2-binary
