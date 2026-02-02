@@ -3,6 +3,7 @@ x-airflow-common: &airflow-common
   build: .
   # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.2}
   environment: &airflow-common-env
+    AIRFLOW__APP__UID: "${AIRFLOW_UID:-50000}"
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
@@ -11,12 +12,16 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
     AIRFLOW__API__AUTH_BACKEND: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    # Database Connections
+    AIRFLOW_CONN_MYSQL_DEFAULT: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql-staging:3306/${MYSQL_DATABASE}
+    AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-analytics:5432/${POSTGRES_DB}
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./config:/opt/airflow/config
+    - ./data:/opt/airflow/data
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     redis:
@@ -154,6 +159,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql-db-volume:/var/lib/mysql
+      - ./scripts/init_mysql.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
       interval: 10s
@@ -171,6 +177,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres-analytics-volume:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: [ "CMD", "pg_isready", "-U", "analytics_user", "-d", "analytics" ]
       interval: 10s
