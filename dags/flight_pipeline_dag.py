@@ -249,12 +249,12 @@ def transform_and_load_analytics(**kwargs):
     dim_date['quarter'] = pd.to_datetime(dim_date['date_id']).dt.quarter
     dim_date['day_of_week'] = pd.to_datetime(dim_date['date_id']).dt.dayofweek
     dim_date['is_weekend'] = dim_date['day_of_week'].apply(lambda x: x >= 5)
-    # Mapping seasonality (simplification: taking first occurrence if conflicting, or merge from raw)
-    # Ideally date dimension is pre-populated. Here we derive from data.
-    # Joining back with raw to get seasonality for that date might cause dupes if multiple seasons?
-    # Let's assume seasonality is consistent per date or take the mode.
-    # For now, we will leave seasonality NULL in dim_date derived solely from date, 
-    # OR we can try to merge it. Simpler approach: Just load date parts.
+    
+    # Map Seasonality from source data
+    # Create a dict of {date: seasonality} from the raw data
+    seasonality_map = df_raw.set_index(df_raw['departure_dt'].dt.date)['seasonality'].to_dict()
+    dim_date['seasonality'] = dim_date['date_id'].map(seasonality_map).fillna('Normal')
+    dim_date['is_weekend'] = dim_date['day_of_week'].apply(lambda x: x >= 5)
     
     # 3. Load Dimensions to Postgres & Get IDs
     pg_hook = PostgresHook(postgres_conn_id='postgres_default')
