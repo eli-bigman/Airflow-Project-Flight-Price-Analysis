@@ -75,15 +75,16 @@ def extract_and_load_staging(**kwargs):
     mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
     engine = mysql_hook.get_sqlalchemy_engine()
     
-    # Initialize Global Hash Cache
-    seen_hashes = set()
+    # Ensure hash table exists (in case init script wasn't run)
+    mysql_hook.run("CREATE TABLE IF NOT EXISTS processed_hashes (row_hash CHAR(32) PRIMARY KEY, load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    
+    # Initialize State
     CHUNK_SIZE = 10000
     total_loaded = 0
     dropped_rows = 0
     
     # Generator for chunks
     # header=0 (keep header from first line), skiprows=range(1, offset+1) (skip processed rows)
-    # We must be careful: if offset=0, range(1, 1) is empty (correct).
     skip_range = range(1, offset + 1) if offset > 0 else None
     
     csv_reader = pd.read_csv(DATA_PATH, chunksize=CHUNK_SIZE, skiprows=skip_range)
@@ -91,6 +92,11 @@ def extract_and_load_staging(**kwargs):
     # Determine Write Mode
     # If offset=0, it's a full reload (or first load), so REPLACE.
     # If offset>0, we are appending new data, so APPEND.
+    # Note: With persistent hashes, we can always use 'append' for data, 
+    # but for safety/cleanup on full resets, 'replace' might be desired.
+    # However, 'replace' on data table doesn't clear hash table. 
+    # Decision: If offset=0, we should probably clear the staging table?
+    # Yes, let's keep the logic consistent.
     write_mode = 'replace' if offset == 0 else 'append'
     
     rows_processed_in_this_run = 0
@@ -99,48 +105,78 @@ def extract_and_load_staging(**kwargs):
         chunk_start_len = len(chunk)
         rows_processed_in_this_run += chunk_start_len
         
-        # 1. Global Hash Deduplication
-        hashes = chunk.apply(lambda x: hashlib.md5(str(tuple(x)).encode('utf-8')).hexdigest(), axis=1)
-        is_new = ~hashes.isin(seen_hashes)
-        clean_chunk = chunk[is_new]
-        seen_hashes.update(hashes[is_new])
+        # 1. Calculate Hashes
+        # Create a hash for each row (using all columns)
+        chunk['row_hash'] = chunk.apply(lambda x: hashlib.md5(str(tuple(x)).encode('utf-8')).hexdigest(), axis=1)
         
+        # 2. Check against DB (Persistent Deduplication)
+        # Verify which hashes already exist
+        chunk_hashes = tuple(chunk['row_hash'].tolist())
+        if not chunk_hashes:
+             continue
+
+        # SQL IN clause needs formatted list
+        format_strings = ','.join(['%s'] * len(chunk_hashes))
+        placeholders = str(chunk_hashes)
+        # Note: mysql_hook.get_pandas_df or get_records with proper parameter binding is safer
+        # But constructing large IN clauses can be tricky.
+        # Efficient approach: Load hashes to temp table? Or simple batch query.
+        # Let's use simple batch query with parameter binding if possible, or straight execution if list is reasonable (10k is fine for IN)
+        
+        # Safer: chunk formatted str
+        ids_str = "'" + "','".join(chunk_hashes) + "'"
+        existing_df = mysql_hook.get_pandas_df(f"SELECT row_hash FROM processed_hashes WHERE row_hash IN ({ids_str})")
+        existing_hashes = set(existing_df['row_hash'].tolist())
+        
+        # 3. Filter Duplicates
+        is_new = ~chunk['row_hash'].isin(existing_hashes)
+        clean_chunk = chunk[is_new].copy()
+        
+        # 4. Filter Stats
         chunk_dropped = chunk_start_len - len(clean_chunk)
         dropped_rows += chunk_dropped
         total_loaded += len(clean_chunk)
         
-        # 2. Rename columns
-        clean_chunk.rename(columns={
-            'Airline': 'airline',
-            'Source': 'source_code',
-            'Source Name': 'source_name',
-            'Destination': 'destination_code',
-            'Destination Name': 'destination_name',
-            'Departure Date & Time': 'departure_datetime',
-            'Arrival Date & Time': 'arrival_datetime',
-            'Duration (hrs)': 'duration_hours',
-            'Stopovers': 'stopovers',
-            'Aircraft Type': 'aircraft_type',
-            'Class': 'class',
-            'Booking Source': 'booking_source',
-            'Base Fare (BDT)': 'base_fare',
-            'Tax & Surcharge (BDT)': 'tax_surcharge',
-            'Total Fare (BDT)': 'total_fare',
-            'Seasonality': 'seasonality',
-            'Days Before Departure': 'days_before_departure'
-        }, inplace=True)
-        
-        if clean_chunk.empty:
-            logger.info(f"Chunk {i}: All rows were duplicates. Skipping load.")
-            continue
+        # 5. Prepare Hash DF for Insert
+        if not clean_chunk.empty:
+            new_hashes_df = clean_chunk[['row_hash']].copy()
+            new_hashes_df['load_timestamp'] = pd.Timestamp.now()
             
-        # 3. Load to MySQL
-        # If write_mode was Replace, only first chunk does replace, subsequent must append
-        current_chunk_mode = write_mode if i == 0 else 'append'
-        
-        clean_chunk.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists=current_chunk_mode, index=False)
-        
-        logger.info(f"Chunk {i} Loaded: {len(clean_chunk)} rows. Mode: {current_chunk_mode}")
+            # Drop hash col from data DF before loading to raw_flight_data
+            clean_chunk_data = clean_chunk.drop(columns=['row_hash'])
+            
+            # 6. Rename columns
+            clean_chunk_data.rename(columns={
+                'Airline': 'airline',
+                'Source': 'source_code',
+                'Source Name': 'source_name',
+                'Destination': 'destination_code',
+                'Destination Name': 'destination_name',
+                'Departure Date & Time': 'departure_datetime',
+                'Arrival Date & Time': 'arrival_datetime',
+                'Duration (hrs)': 'duration_hours',
+                'Stopovers': 'stopovers',
+                'Aircraft Type': 'aircraft_type',
+                'Class': 'class',
+                'Booking Source': 'booking_source',
+                'Base Fare (BDT)': 'base_fare',
+                'Tax & Surcharge (BDT)': 'tax_surcharge',
+                'Total Fare (BDT)': 'total_fare',
+                'Seasonality': 'seasonality',
+                'Days Before Departure': 'days_before_departure'
+            }, inplace=True)
+            
+            # 7. Load Data to MySQL
+            current_chunk_mode = write_mode if i == 0 else 'append'
+            clean_chunk_data.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists=current_chunk_mode, index=False)
+            
+            # 8. Load Hashes to MySQL
+            # We use 'append' always for hashes
+            new_hashes_df.to_sql('processed_hashes', con=engine, schema='staging_flight_data', if_exists='append', index=False)
+            
+            logger.info(f"Chunk {i} Loaded: {len(clean_chunk)} rows. (Dropped {chunk_dropped} dupes). Mode: {current_chunk_mode}")
+        else:
+             logger.info(f"Chunk {i}: All {chunk_start_len} rows were already in DB. Skipping.")
 
     # Update Offset Variable
     new_offset = offset + rows_processed_in_this_run

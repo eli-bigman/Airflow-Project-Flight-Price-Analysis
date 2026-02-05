@@ -21,3 +21,7 @@ CREATE TABLE IF NOT EXISTS raw_flight_data (
     days_before_departure INT,
     load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS processed_hashes (
+    row_hash CHAR(32) PRIMARY KEY,
+    load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
