@@ -3,16 +3,29 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.dates import days_ago
+from airflow.sensors.sql import SqlSensor
+from datetime import timedelta
 import pandas as pd
 import os
+import hashlib
 from sqlalchemy import create_engine
 import logging
+
+try:
+    from utils.logger import FlightLogger
+    logger = FlightLogger.get_logger("flight_pipeline")
+except ImportError:
+    # Fallback if utils not found (e.g. during simple testing)
+    logger = logging.getLogger("flight_pipeline")
+    logger.setLevel(logging.INFO)
+
 
 # Define default arguments
 default_args = {
     'owner': 'airflow',
     'start_date': days_ago(1),
-    'retries': 1,
+    'retries': 3,
+    'retry_delay': timedelta(minutes=5),
 }
 
 # Define DAG
@@ -28,49 +41,83 @@ DATA_PATH = '/opt/airflow/data/Flight_Price_Dataset_of_Bangladesh.csv'
 
 def extract_and_load_staging(**kwargs):
     """
-    Reads CSV and loads into MySQL Staging.
+    Reads CSV in chunks and loads into MySQL Staging with Global Hash Deduplication.
     """
-    logging.info("Starting extraction from CSV...")
+    logger.info("Starting extraction from CSV with Scalable Chunking...")
     if not os.path.exists(DATA_PATH):
         raise FileNotFoundError(f"File not found: {DATA_PATH}")
     
-    df = pd.read_csv(DATA_PATH)
-    
-    # Rename columns to match MySQL schema
-    df.rename(columns={
-        'Airline': 'airline',
-        'Source': 'source_code',
-        'Source Name': 'source_name',
-        'Destination': 'destination_code',
-        'Destination Name': 'destination_name',
-        'Departure Date & Time': 'departure_datetime',
-        'Arrival Date & Time': 'arrival_datetime',
-        'Duration (hrs)': 'duration_hours',
-        'Stopovers': 'stopovers',
-        'Aircraft Type': 'aircraft_type',
-        'Class': 'class',
-        'Booking Source': 'booking_source',
-        'Base Fare (BDT)': 'base_fare',
-        'Tax & Surcharge (BDT)': 'tax_surcharge',
-        'Total Fare (BDT)': 'total_fare',
-        'Seasonality': 'seasonality',
-        'Days Before Departure': 'days_before_departure'
-    }, inplace=True)
-    
-    # Simple transformation: Clean logic if needed
-    # For now, just load raw data
-    
-    logging.info(f"Loaded DataFrame with {len(df)} rows. Columns: {df.columns.tolist()}")
-
     # Connect to MySQL using Airflow Hook
     mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
     engine = mysql_hook.get_sqlalchemy_engine()
     
-    logging.info("Loading data into MySQL staging_flight_data.raw_flight_data...")
-    # Use replace for idempotency on full reload scenarios, or append for incremental
-    # Here we use replace to ensure freshness for this demo
-    df.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists='replace', index=False)
-    logging.info("Data loaded successfully to MySQL.")
+    # Initialize Global Hash Cache
+    seen_hashes = set()
+    CHUNK_SIZE = 10000
+    total_rows = 0
+    dropped_rows = 0
+    
+    # Generator for chunks
+    csv_reader = pd.read_csv(DATA_PATH, chunksize=CHUNK_SIZE)
+    
+    # Clear table before loading (Full Load strategy)
+    # We use 'if_exists=replace' on first chunk, then 'append'
+    first_chunk = True
+    
+    for i, chunk in enumerate(csv_reader):
+        chunk_start_len = len(chunk)
+        
+        # 1. Global Hash Deduplication
+        # Create a hash for each row (using all columns)
+        # We convert row to tuple -> string -> ecode -> md5
+        hashes = chunk.apply(lambda x: hashlib.md5(str(tuple(x)).encode('utf-8')).hexdigest(), axis=1)
+        
+        # Check against cache
+        is_new = ~hashes.isin(seen_hashes)
+        
+        # Filter chunk
+        clean_chunk = chunk[is_new]
+        
+        # Update cache with NEW hashes
+        seen_hashes.update(hashes[is_new])
+        
+        chunk_dropped = chunk_start_len - len(clean_chunk)
+        dropped_rows += chunk_dropped
+        total_rows += len(clean_chunk)
+        
+        # 2. Rename columns
+        clean_chunk.rename(columns={
+            'Airline': 'airline',
+            'Source': 'source_code',
+            'Source Name': 'source_name',
+            'Destination': 'destination_code',
+            'Destination Name': 'destination_name',
+            'Departure Date & Time': 'departure_datetime',
+            'Arrival Date & Time': 'arrival_datetime',
+            'Duration (hrs)': 'duration_hours',
+            'Stopovers': 'stopovers',
+            'Aircraft Type': 'aircraft_type',
+            'Class': 'class',
+            'Booking Source': 'booking_source',
+            'Base Fare (BDT)': 'base_fare',
+            'Tax & Surcharge (BDT)': 'tax_surcharge',
+            'Total Fare (BDT)': 'total_fare',
+            'Seasonality': 'seasonality',
+            'Days Before Departure': 'days_before_departure'
+        }, inplace=True)
+        
+        if clean_chunk.empty:
+            logger.info(f"Chunk {i}: All rows were duplicates. Skipping load.")
+            continue
+            
+        # 3. Load to MySQL
+        write_mode = 'replace' if first_chunk else 'append'
+        clean_chunk.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists=write_mode, index=False)
+        
+        logger.info(f"Chunk {i} Loaded: {len(clean_chunk)} rows. (Dropped {chunk_dropped} dupes). Mode: {write_mode}")
+        first_chunk = False
+
+    logger.info(f"Extraction Complete. Total Loaded: {total_rows}. Total Dropped (Global Dupes): {dropped_rows}")
 
 def transform_and_load_analytics(**kwargs):
     """
@@ -79,10 +126,44 @@ def transform_and_load_analytics(**kwargs):
     # 1. Extract from MySQL
     mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
     df_raw = mysql_hook.get_pandas_df("SELECT * FROM staging_flight_data.raw_flight_data")
-    logging.info(f"Extracted {len(df_raw)} rows from MySQL.")
+    logger.info(f"Extracted {len(df_raw)} rows from MySQL.")
     
     # 2. Transform Step
     
+    # --- Data Cleaning ---
+    # A. String Standardization
+    string_cols = ['airline', 'source_name', 'destination_name', 'aircraft_type', 'class', 'booking_source', 'seasonality']
+    for col in string_cols:
+        if col in df_raw.columns:
+            df_raw[col] = df_raw[col].astype(str).str.strip().str.title()
+            
+    # B. Stopover Parsing ("Direct" -> 0, "1 Stop" -> 1)
+    def parse_stopovers(val):
+        s = str(val).lower().strip()
+        if 'direct' in s or 'non-stop' in s:
+            return 0
+        if 'stop' in s:
+            try:
+                # Extract first number found
+                return int(''.join(filter(str.isdigit, s)))
+            except:
+                return 0 # Fallback
+        return 0
+        
+    df_raw['stopovers'] = df_raw['stopovers'].apply(parse_stopovers)
+    
+    # C. Numeric Rounding & Validation
+    numeric_cols = ['duration_hours', 'base_fare', 'tax_surcharge', 'total_fare']
+    for col in numeric_cols:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0).round(2)
+        
+    # Drop invalid negatives
+    initial_len = len(df_raw)
+    df_raw = df_raw[(df_raw['total_fare'] > 0) & (df_raw['duration_hours'] > 0)]
+    dropped_invalid = initial_len - len(df_raw)
+    if dropped_invalid > 0:
+        logger.warning(f"Dropped {dropped_invalid} rows with invalid (<=0) Fare or Duration.")
+
     # --- Dimension: Airlines ---
     dim_airlines = df_raw[['airline']].drop_duplicates().reset_index(drop=True)
     dim_airlines.rename(columns={'airline': 'airline_name'}, inplace=True)
@@ -130,7 +211,7 @@ def transform_and_load_analytics(**kwargs):
             
         if not new_records.empty:
             new_records.to_sql(table_name, pg_engine, schema=schema, if_exists='append', index=False)
-            logging.info(f"Inserted {len(new_records)} new rows into {table_name}")
+            logger.info(f"Inserted {len(new_records)} new rows into {table_name}")
         
         # Reload to get all IDs
         final_dim = pd.read_sql(f"SELECT * FROM {schema}.{table_name}", pg_engine)
@@ -149,7 +230,7 @@ def transform_and_load_analytics(**kwargs):
         if not new_dates.empty:
             new_dates.to_sql('dim_date', pg_engine, schema='analytics', if_exists='append', index=False)
     except Exception as e:
-        logging.warning(f"Date load issue (might be empty table): {e}")
+        logger.warning(f"Date load issue (might be empty table): {e}")
         dim_date.to_sql('dim_date', pg_engine, schema='analytics', if_exists='append', index=False)
 
     # 4. Prepare Fact Table
@@ -170,12 +251,65 @@ def transform_and_load_analytics(**kwargs):
     df_fact = df_fact.dropna(subset=['airline_id', 'source_airport_id', 'destination_airport_id', 'departure_date_id'])
     
     # Load Facts
-    logging.info("Loading facts...")
+    logger.info("Loading facts...")
     df_fact[fact_columns].to_sql('fact_flights', pg_engine, schema='analytics', if_exists='append', index=False)
-    logging.info("Fact table loaded successfully.")
+    logger.info("Fact table loaded successfully.")
+
+def validate_row_counts(**kwargs):
+    """
+    Validates data integrity by comparing row counts across Source, Staging, and Analytics.
+    """
+    logger.info("Starting Data Validation...")
+    
+    # 1. Source Count
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(f"File not found: {DATA_PATH}")
+    source_count = len(pd.read_csv(DATA_PATH))
+    logger.info(f"Source CSV Count: {source_count}")
+    
+    # 2. Staging Count
+    mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
+    staging_count = mysql_hook.get_first("SELECT COUNT(*) FROM staging_flight_data.raw_flight_data")[0]
+    logger.info(f"MySQL Staging Count: {staging_count}")
+    
+    # 3. Analytics Count
+    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
+    analytics_count = pg_hook.get_first("SELECT COUNT(*) FROM analytics.fact_flights")[0]
+    logger.info(f"Postgres Analytics Count: {analytics_count}")
+    
+    # Validation Logic
+    # Staging should match Source exactly
+    if source_count != staging_count:
+        raise ValueError(f"Data Loss detected! Source: {source_count}, Staging: {staging_count}")
+        
+    # Analytics might be slightly less due to drops (bad data), but let's warn if difference is > 1%
+    diff = source_count - analytics_count
+    if diff > (source_count * 0.01):
+        raise ValueError(f"High Data Loss in Analytics! Source: {source_count}, Analytics: {analytics_count}, Dropped: {diff}")
+        
+    logger.info("Data Validation Passed successfully.")
 
 
 # Define Tasks
+# Sensors
+wait_for_mysql = SqlSensor(
+    task_id='wait_for_mysql',
+    conn_id='mysql_default',
+    sql="SELECT 1",
+    poke_interval=10,
+    timeout=600,
+    dag=dag,
+)
+
+wait_for_postgres = SqlSensor(
+    task_id='wait_for_postgres',
+    conn_id='postgres_default',
+    sql="SELECT 1",
+    poke_interval=10,
+    timeout=600,
+    dag=dag,
+)
+
 t1 = PythonOperator(
     task_id='load_csv_to_mysql_staging',
     python_callable=extract_and_load_staging,
@@ -188,4 +322,11 @@ t2 = PythonOperator(
     dag=dag,
 )
 
-t1 >> t2
+validate_task = PythonOperator(
+    task_id='validate_row_counts',
+    python_callable=validate_row_counts,
+    dag=dag,
+)
+
+# Dependencies
+[wait_for_mysql, wait_for_postgres] >> t1 >> t2 >> validate_task
