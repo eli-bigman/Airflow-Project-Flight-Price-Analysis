@@ -1,3 +1,4 @@
+-- DROP SCHEMA IF EXISTS analytics CASCADE;
 CREATE SCHEMA IF NOT EXISTS analytics;
 -- 1. Dimension: Airlines
 CREATE TABLE IF NOT EXISTS analytics.dim_airlines (

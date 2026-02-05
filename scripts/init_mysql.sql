@@ -1,5 +1,8 @@
 CREATE DATABASE IF NOT EXISTS staging_flight_data;
 USE staging_flight_data;
+-- DROP TABLE IF EXISTS raw_flight_data;
+-- DROP TABLE IF EXISTS processed_hashes;
+
 CREATE TABLE IF NOT EXISTS raw_flight_data (
     id INT AUTO_INCREMENT PRIMARY KEY,
     airline VARCHAR(100),
