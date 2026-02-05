@@ -1,4 +1,5 @@
 from airflow import DAG
+from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -41,12 +42,35 @@ DATA_PATH = '/opt/airflow/data/Flight_Price_Dataset_of_Bangladesh.csv'
 
 def extract_and_load_staging(**kwargs):
     """
-    Reads CSV in chunks and loads into MySQL Staging with Global Hash Deduplication.
+    Reads CSV in chunks and loads into MySQL Staging with Global Hash Deduplication & Incremental Loading.
     """
-    logger.info("Starting extraction from CSV with Scalable Chunking...")
+    logger.info("Starting extraction from CSV with Scalable Chunking & Incremental Loading...")
     if not os.path.exists(DATA_PATH):
         raise FileNotFoundError(f"File not found: {DATA_PATH}")
     
+    # --- Incremental Logic ---
+    # 1. Get current file size (lines) to detect resets or growth
+    # Note: Counting lines in python can be slow for massive files, but for 57k it's instant.
+    # For huge files, os.path.getsize (bytes) is better, but CSV parsing is line-based.
+    # Let's use a robust line counter.
+    with open(DATA_PATH, 'rb') as f:
+        file_line_count = sum(1 for _ in f)
+    
+    # 2. Get stored offset
+    offset = int(Variable.get("flight_csv_offset", default_var=0))
+    logger.info(f"Current File Lines: {file_line_count}. Stored Offset: {offset}")
+    
+    # 3. Handle File Reset (New file is smaller than offset)
+    if file_line_count < offset:
+        logger.warning(f"File size ({file_line_count}) < Offset ({offset}). Detecting Reset/New File. Resetting offset to 0.")
+        offset = 0
+        
+    # 4. Check if new data exists
+    rows_to_process = file_line_count - 1 - offset # -1 for header
+    if rows_to_process <= 0:
+        logger.info("No new rows to process. Skipping extraction.")
+        return
+
     # Connect to MySQL using Airflow Hook
     mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
     engine = mysql_hook.get_sqlalchemy_engine()
@@ -54,36 +78,36 @@ def extract_and_load_staging(**kwargs):
     # Initialize Global Hash Cache
     seen_hashes = set()
     CHUNK_SIZE = 10000
-    total_rows = 0
+    total_loaded = 0
     dropped_rows = 0
     
     # Generator for chunks
-    csv_reader = pd.read_csv(DATA_PATH, chunksize=CHUNK_SIZE)
+    # header=0 (keep header from first line), skiprows=range(1, offset+1) (skip processed rows)
+    # We must be careful: if offset=0, range(1, 1) is empty (correct).
+    skip_range = range(1, offset + 1) if offset > 0 else None
     
-    # Clear table before loading (Full Load strategy)
-    # We use 'if_exists=replace' on first chunk, then 'append'
-    first_chunk = True
+    csv_reader = pd.read_csv(DATA_PATH, chunksize=CHUNK_SIZE, skiprows=skip_range)
     
+    # Determine Write Mode
+    # If offset=0, it's a full reload (or first load), so REPLACE.
+    # If offset>0, we are appending new data, so APPEND.
+    write_mode = 'replace' if offset == 0 else 'append'
+    
+    rows_processed_in_this_run = 0
+
     for i, chunk in enumerate(csv_reader):
         chunk_start_len = len(chunk)
+        rows_processed_in_this_run += chunk_start_len
         
         # 1. Global Hash Deduplication
-        # Create a hash for each row (using all columns)
-        # We convert row to tuple -> string -> ecode -> md5
         hashes = chunk.apply(lambda x: hashlib.md5(str(tuple(x)).encode('utf-8')).hexdigest(), axis=1)
-        
-        # Check against cache
         is_new = ~hashes.isin(seen_hashes)
-        
-        # Filter chunk
         clean_chunk = chunk[is_new]
-        
-        # Update cache with NEW hashes
         seen_hashes.update(hashes[is_new])
         
         chunk_dropped = chunk_start_len - len(clean_chunk)
         dropped_rows += chunk_dropped
-        total_rows += len(clean_chunk)
+        total_loaded += len(clean_chunk)
         
         # 2. Rename columns
         clean_chunk.rename(columns={
@@ -111,13 +135,18 @@ def extract_and_load_staging(**kwargs):
             continue
             
         # 3. Load to MySQL
-        write_mode = 'replace' if first_chunk else 'append'
-        clean_chunk.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists=write_mode, index=False)
+        # If write_mode was Replace, only first chunk does replace, subsequent must append
+        current_chunk_mode = write_mode if i == 0 else 'append'
         
-        logger.info(f"Chunk {i} Loaded: {len(clean_chunk)} rows. (Dropped {chunk_dropped} dupes). Mode: {write_mode}")
-        first_chunk = False
+        clean_chunk.to_sql('raw_flight_data', con=engine, schema='staging_flight_data', if_exists=current_chunk_mode, index=False)
+        
+        logger.info(f"Chunk {i} Loaded: {len(clean_chunk)} rows. Mode: {current_chunk_mode}")
 
-    logger.info(f"Extraction Complete. Total Loaded: {total_rows}. Total Dropped (Global Dupes): {dropped_rows}")
+    # Update Offset Variable
+    new_offset = offset + rows_processed_in_this_run
+    Variable.set("flight_csv_offset", new_offset)
+    
+    logger.info(f"Incremental Extraction Complete. Processed {rows_processed_in_this_run} new rows. New Offset: {new_offset}.")
 
 def transform_and_load_analytics(**kwargs):
     """
