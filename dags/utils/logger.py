@@ -8,16 +8,17 @@ class FlightLogger:
     Ensures consistent formatting and output handling (File + Console).
     """
     
-    _initialized = False
-
     @staticmethod
     def get_logger(name: str):
         """
         Returns a configured logger instance.
+        Logs to:
+        1. Console (Standard Output) -> captured by Airflow UI
+        2. File -> /opt/airflow/logs/flight_pipeline_debug.log (for quick local debugging)
         """
         logger = logging.getLogger(name)
         
-        # Prevent adding handlers multiple times
+        # Prevent adding handlers multiple times (Airflow quirk)
         if logger.hasHandlers():
             return logger
             
@@ -34,17 +35,19 @@ class FlightLogger:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
-        # 2. File Handler (Optional - ensures logs persist if needed outside Docker stdout)
-        # Check if logs directory exists and is writable
-        log_dir = os.environ.get('AIRFLOW_HOME', '/opt/airflow') + '/logs/custom_pipeline_logs'
+        # 2. File Handler (Simplified for Debugging)
+        # We target the standard airflow logs folder so it persists (if mounted) or is easy to find
+        log_dir = os.environ.get('AIRFLOW_HOME', '/opt/airflow') + '/logs'
+        log_file = f"{log_dir}/flight_pipeline_debug.log"
+        
         try:
             os.makedirs(log_dir, exist_ok=True)
-            file_handler = logging.FileHandler(f"{log_dir}/pipeline.log")
+            file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
         except Exception as e:
-            # Fallback if permission denied or path issue (common in Docker)
-            print(f"Warning: Could not setup file logging: {e}")
+            # Fallback if permission denied (common in Docker if volume issues)
+            print(f"Warning: Could not setup file logging at {log_file}: {e}")
 
         logger.propagate = False # Prevent double logging (Airflow root logger)
         return logger
