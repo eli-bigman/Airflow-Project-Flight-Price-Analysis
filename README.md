@@ -22,38 +22,28 @@ The pipeline follows a linear data flow orchestrated by the `flight_price_pipeli
 
 ```mermaid
 graph LR
-    subgraph Source
-        CSV[Flight_Price_Dataset.csv]
+    subgraph Sensors
+        WaitMySQL[wait_for_mysql]
+        WaitPostgres[wait_for_postgres]
     end
 
-    subgraph Orchestration [Apache Airflow]
-        direction TB
-        Task1[Task: load_csv_to_mysql_staging]
-        Task2[Task: transform_and_load_star_schema]
+    subgraph ETL_Tasks
+        Task1[load_csv_to_mysql_staging]
+        Task2[transform_and_load_star_schema]
+        Task3[validate_row_counts]
     end
 
-    subgraph Staging [Staging Layer]
-        MySQL[(MySQL DB<br/>raw_flight_data)]
-    end
+    %% Dependencies matching Python: [wait_for_mysql, wait_for_postgres] >> t1 >> t2 >> validate_task
+    WaitMySQL -->|>>| Task1
+    WaitPostgres -->|>>| Task1
+    Task1 -->|>>| Task2
+    Task2 -->|>>| Task3
 
-    subgraph Analytics [Analytics Layer]
-        Postgres[(PostgreSQL DB<br/>Star Schema)]
-    end
-
-    %% Data Flow
-    CSV -->|Read & Clean| Task1
-    Task1 -->|Load Raw Data| MySQL
-    MySQL -->|Extract Raw| Task2
-    Task2 -->|Transform & Load| Postgres
-
-    %% Dependency
-    Task1 -.->|Trigger| Task2
-
-    style Source fill:#f9f9f9,stroke:#333,stroke-width:2px
-    style Orchestration fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    style Staging fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style Analytics fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    style Sensors fill:#fff9c4,stroke:#fbc02d,stroke-width:2px
+    style ETL_Tasks fill:#e1f5fe,stroke:#01579b,stroke-width:2px
 ```
+
+![Architecture Diagram](images/architecture.png)
 
 ### Pipeline Workflow (`flight_price_pipeline`)
 
@@ -122,6 +112,24 @@ erDiagram
 
 ---
 
+## 📊 Data Insights & Visualizations
+
+The pipeline feeds into a BI dashboard that tracks key metrics such as average fare by airline, booking trends, and route popularity.
+
+![Dashboard](images/dashboard.png)
+
+### Key Metrics
+
+|                    Average Fare by Airline                     |               Booking Count by Airline                |
+| :------------------------------------------------------------: | :---------------------------------------------------: |
+| ![Average Fare](images/Average_of_Base_Fare_by_Airline_ID.png) | ![Booking Count](images/Booking_count_by_airline.png) |
+
+|              Fare Trend Over Time              |               Most Popular Route                |
+| :--------------------------------------------: | :---------------------------------------------: |
+| ![Fare Trend](images/fare_trend_over_time.png) | ![Popular Route](images/most_popular_route.png) |
+
+---
+
 ## 🛠️ Technology Stack
 
 | Component            | Technology                                                                                                               | Description                               |
@@ -177,6 +185,20 @@ erDiagram
 2.  Toggle the DAG to **ON**.
 3.  Click the **Trigger DAG** (Play button) to start a manual run.
 4.  Monitor the `Graph` view to watch tasks execute.
+
+5.  **Access Metabase UI**
+    - Wait for the containers to be healthy.
+    - Open browser: [http://localhost:3000](http://localhost:3000)
+    - **Username/Password**: `[EMAIL_ADDRESS]` / `[New Password]`
+    - **Database**: `postgres`
+    - **Port**: `5432`
+    - **Username**: `analytics_user`
+    - **Password**: `[password used in .env file for postgres]`
+
+6.  **Access DbGate UI**
+    - Wait for the containers to be healthy.
+    - Open browser: [http://localhost:3000](http://localhost:3000)
+    - **Username/Password**: `[db_credentials in .env]` / `[db_credentials in .env]`
 
 ---
 
