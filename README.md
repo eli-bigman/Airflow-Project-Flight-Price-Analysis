@@ -206,7 +206,11 @@ The pipeline feeds into a BI dashboard that tracks key metrics such as average f
 
 ```bash
 ├── dags/
-│   └── flight_pipeline_dag.py    # Main Airflow DAG definition
+│   ├── flight_pipeline_dag.py    # Main Airflow DAG Orchestrator
+│   └── tasks/                    # Modular Task Logic
+│       ├── ingestion.py          # Extraction & Staging Logic
+│       ├── transformation.py     # Star Schema Transformation Logic
+│       └── validation.py         # Data Integrity Checks
 ├── data/
 │   └── ...csv                    # Source dataset
 ├── scripts/

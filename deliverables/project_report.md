@@ -39,6 +39,14 @@ The data flows linearly through the system, managed by the `flight_price_pipelin
 **Schedule**: `@daily`
 **Description**: An automated ELT pipeline that ingests flight data, processes it, and loads it into a Star Schema for analysis.
 
+**Code Structure**:
+The pipeline follows a **Modular Task Architecture** to separate orchestration from business logic:
+
+- `dags/flight_pipeline_dag.py`: **Orchestrator**. Defines the DAG schedule and dependencies.
+- `dags/tasks/ingestion.py`: Handles CSV reading and MySQL staging.
+- `dags/tasks/transformation.py`: Handles data cleaning and Star Schema logic.
+- `dags/tasks/validation.py`: Handles data quality checks.
+
 The pipeline consists of the following sequential tasks:
 
 ### 1. Infrastructure Checks (Sensors)
