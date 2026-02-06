@@ -25,4 +25,4 @@ logs/
 *.md
 !README.md
 !docs/*.md
-
+!deliverables/project_report.md
