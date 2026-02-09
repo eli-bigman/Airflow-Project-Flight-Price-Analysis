@@ -45,13 +45,13 @@ def extract_and_load_staging(**kwargs):
         
         try:
             # 2. Read CSV (Load entire file)
-            # Since files are "new batches", we load them fully.
             df = pd.read_csv(file_path)
             
             if df.empty:
                 logger.warning(f"File {filename} is empty. Moving to archive without loading.")
+
             else:
-                # 3. Rename columns to snake_case (Standardization)
+                # 4. Rename columns to snake_case (Standardization)
                 df.rename(columns={
                     'Airline': 'airline',
                     'Source': 'source_code',
@@ -90,6 +90,6 @@ def extract_and_load_staging(**kwargs):
                 os.makedirs(ERROR_DIR, exist_ok=True)
                 
             shutil.move(file_path, os.path.join(ERROR_DIR, filename))
-            logger.info(f"Error {filename} moved to: {os.path.join(ERROR_DIR, filename)}")
+            logger.error(f"Error {filename} moved to: {os.path.join(ERROR_DIR, filename)}")
 
     logger.info("Batch Ingestion Complete.")
