@@ -7,7 +7,8 @@ from datetime import timedelta
 # Import modular tasks
 from tasks.ingestion import extract_and_load_staging
 from tasks.transformation import transform_and_load_analytics
-from tasks.validation import validate_row_counts
+from tasks.validate_input import validate_input_files
+from tasks.validate_analytics import validate_analytics_data
 
 # Define default arguments
 default_args = {
@@ -46,6 +47,13 @@ wait_for_postgres = SqlSensor(
 )
 
 # --- Tasks ---
+# Pre-Ingestion Validation
+validate_pre_task = PythonOperator(
+    task_id='validate_input_files',
+    python_callable=validate_input_files,
+    dag=dag,
+)
+
 t1 = PythonOperator(
     task_id='load_csv_to_mysql_staging',
     python_callable=extract_and_load_staging,
@@ -58,11 +66,12 @@ t2 = PythonOperator(
     dag=dag,
 )
 
-validate_task = PythonOperator(
-    task_id='validate_row_counts',
-    python_callable=validate_row_counts,
+# Post-Transformation Validation
+validate_post_task = PythonOperator(
+    task_id='validate_analytics_data',
+    python_callable=validate_analytics_data,
     dag=dag,
 )
 
 # --- Dependencies ---
-[wait_for_mysql, wait_for_postgres] >> t1 >> t2 >> validate_task
+validate_pre_task >> [wait_for_mysql, wait_for_postgres] >> t1 >> t2 >> validate_post_task
