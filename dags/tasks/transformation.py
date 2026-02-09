@@ -57,6 +57,9 @@ def transform_and_load_analytics(**kwargs):
     for col in string_cols:
         if col in df_raw.columns:
             df_raw[col] = df_raw[col].astype(str).str.strip().str.title()
+        else:
+            logger.warning(f"Column '{col}' missing from source data. Filling with 'Unknown'.")
+            df_raw[col] = 'Unknown'
             
     # B. Stopover Parsing
     df_raw['stopovers'] = df_raw['stopovers'].apply(_parse_stopovers)
