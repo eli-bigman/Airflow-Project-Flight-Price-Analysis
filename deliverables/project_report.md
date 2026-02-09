@@ -63,8 +63,12 @@ The pipeline consists of the following sequential tasks:
 
 - **`load_csv_to_mysql_staging`** (`PythonOperator`):
   - **Role**: The **Ingestion Engine**.
-  - **Function**: Reads the raw CSV dataset in chunks. To handle efficient loads, it uses an _Offset_ mechanism to read only new lines added since the last run.
-  - **Deduplication**: Generates a unique MD5 hash for every row and checks it against a reference table (`processed_hashes`) to ensure only unique data is eagerly loaded into `staging_flight_data.raw_flight_data` in MySQL.
+  - **Function**: Scans the `data/input/` directory for any new CSV files.
+  - **Process**:
+    1.  Reads each file entirely.
+    2.  Loads data into MySQL `staging_flight_data.raw_flight_data`.
+    3.  **Archives** the processed file to `data/archive/` to ensure it is not re-processed.
+  - **Benefit**: This "Process & Archive" pattern ensures idempotency and provides a clear history of processed files.
 
 ### 3. Transformation
 
@@ -117,20 +121,12 @@ The Star Schema enables the calculation of the following Key Performance Indicat
 
 ## 4. Challenges Encountered & Resolutions
 
-### Challenge 1: Duplicate Data Handling
+### Challenge 1: Incremental Data Loading
 
-**Issue**: Re-running the pipeline resulted in duplicate entries in the database, skewing analytics.
-**Root Cause**: The pipeline initially blindly appended data.
-**Resolution**: Implemented a **Content-Addressable Hashing** strategy.
+**Issue**: The dataset grows over time, and re-processing the entire file every day is inefficient and leads to duplicates.
+**Initial Approach**: We tried using an "Offset" variable to track line numbers in a single growing file.
+**Refined Resolution**: Switched to a **"Process & Archive"** pattern.
 
-- We generate a unique MD5 hash for every row based on its content.
-- Before inserting, we check a `processed_hashes` reference table.
-- Only records with new, unseen hashes are ingested.
-
-### Challenge 2: Incremental Loading of Large Files
-
-**Issue**: Processing the entire dataset every time is inefficient and resource-heavy.
-**Resolution**: Implemented an **Offset-based Reader**.
-
-- The generic `flight_csv_offset` Airflow Variable tracks the last read line number.
-- On the next run, the reader simply seeks to that offset and continues, processing only new appended lines.
+- New data arrives in `data/input/`.
+- The pipeline processes the file and immediately moves it to `data/archive/`.
+- This ensures that only _new_ data is ever processed, eliminating the need for complex offset tracking or hash-based deduplication.
