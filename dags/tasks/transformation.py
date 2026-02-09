@@ -44,12 +44,37 @@ def _load_dim_and_get_map(pg_engine, dim_df, table_name, unique_col, id_col, sch
 
 def transform_and_load_analytics(**kwargs):
     """
-    Extracts from MySQL, transforms to Star Schema, and loads to Postgres.
+    Extracts from MySQL (Incremental via Watermark), transforms to Star Schema, and loads to Postgres.
     """
-    # 1. Extract from MySQL
+    # 1. Setup Hooks
     mysql_hook = MySqlHook(mysql_conn_id='mysql_default')
-    df_raw = mysql_hook.get_pandas_df("SELECT * FROM staging_flight_data.raw_flight_data")
-    logger.info(f"Extracted {len(df_raw)} rows from MySQL.")
+    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
+    pg_engine = pg_hook.get_sqlalchemy_engine()
+    
+    # 2. Get High Watermark (Max load_timestamp from Target)
+    start_date = '1970-01-01 00:00:00'
+    try:
+        # Check if table exists and get max time
+        # We use a try-except block in case the table doesn't exist yet
+        max_ts_df = pd.read_sql("SELECT MAX(load_timestamp) as max_ts FROM analytics.fact_flights", pg_engine)
+        if not max_ts_df.empty and max_ts_df.iloc[0]['max_ts']:
+            start_date = max_ts_df.iloc[0]['max_ts']
+            
+        logger.info(f"High Watermark found: {start_date}")
+    except Exception as e:
+         logger.info(f"No existing watermark found (Table might be empty or missing). Defaulting to {start_date}. Error: {e}")
+
+    # 3. Extract New Data from Source
+    # Note: We fetch rows strictly greater than the watermark
+    extract_sql = f"SELECT * FROM staging_flight_data.raw_flight_data WHERE load_timestamp > '{start_date}'"
+    df_raw = mysql_hook.get_pandas_df(extract_sql)
+    logger.info(f"Extracted {len(df_raw)} new rows from MySQL (since {start_date}).")
+    
+    if df_raw.empty:
+        logger.info("No new rows to process. Skipping transformation.")
+        return
+        
+    # ... (Transformations A, B, C same as before) ...
     
     # 2. Transform Step
     # A. String Standardization
@@ -104,9 +129,6 @@ def transform_and_load_analytics(**kwargs):
     dim_date['seasonality'] = dim_date['date_id'].map(seasonality_map).fillna('Normal')
     
     # 3. Load Dimensions to Postgres & Get IDs
-    pg_hook = PostgresHook(postgres_conn_id='postgres_default')
-    pg_engine = pg_hook.get_sqlalchemy_engine()
-    
     airline_map = _load_dim_and_get_map(pg_engine, dim_airlines, 'dim_airlines', 'airline_name', 'airline_id')
     airport_map = _load_dim_and_get_map(pg_engine, dim_airports, 'dim_airports', 'airport_code', 'airport_id')
     
@@ -128,14 +150,23 @@ def transform_and_load_analytics(**kwargs):
     df_fact['destination_airport_id'] = df_fact['destination_code'].map(airport_map)
     df_fact['departure_date_id'] = df_fact['departure_dt'].dt.date
     
+    # Include load_timestamp for watermark tracking
+    if 'load_timestamp' not in df_fact.columns:
+        # Fallback if not in source (should be there from schema)
+        df_fact['load_timestamp'] = pd.Timestamp.now()
+    
     fact_columns = [
         'airline_id', 'source_airport_id', 'destination_airport_id', 'departure_date_id',
         'aircraft_type', 'class', 'stopovers', 'booking_source',
-        'duration_hours', 'days_before_departure', 'base_fare', 'tax_surcharge', 'total_fare'
+        'duration_hours', 'days_before_departure', 'base_fare', 'tax_surcharge', 'total_fare',
+        'load_timestamp' # Critical for Watermark
     ]
     
     df_fact = df_fact.dropna(subset=['airline_id', 'source_airport_id', 'destination_airport_id', 'departure_date_id'])
     
     logger.info("Loading facts...")
     df_fact[fact_columns].to_sql('fact_flights', pg_engine, schema='analytics', if_exists='append', index=False)
-    logger.info("Fact table loaded successfully.")
+    logger.info(f"Fact table loaded successfully with {len(df_fact)} rows.")
+    
+    # 5. NO Update back to Staging needed (Watermark Strategy)
+    # We rely on load_timestamp for next run.
