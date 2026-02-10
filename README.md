@@ -20,29 +20,6 @@ This project implements a **Modern Data Stack (MDS)** to analyze flight prices. 
 
 The pipeline follows a linear data flow orchestrated by the `flight_price_pipeline` DAG.
 
-```mermaid
-graph LR
-    subgraph Sensors
-        WaitMySQL[wait_for_mysql]
-        WaitPostgres[wait_for_postgres]
-    end
-
-    subgraph ETL_Tasks
-        Task1[load_csv_to_mysql_staging]
-        Task2[transform_and_load_star_schema]
-        Task3[validate_row_counts]
-    end
-
-    %% Dependencies matching Python: [wait_for_mysql, wait_for_postgres] >> t1 >> t2 >> validate_task
-    WaitMySQL -->|>>| Task1
-    WaitPostgres -->|>>| Task1
-    Task1 -->|>>| Task2
-    Task2 -->|>>| Task3
-
-    style Sensors fill:#fff9c4,stroke:#fbc02d,stroke-width:2px
-    style ETL_Tasks fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-```
-
 ![Architecture Diagram](images/architecture.png)
 
 ### Pipeline Workflow (`flight_price_pipeline`)
