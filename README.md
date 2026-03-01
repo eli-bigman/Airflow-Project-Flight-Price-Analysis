@@ -2,7 +2,7 @@
 
 A robust, containerized **End-to-End ELT Pipeline** that ingests flight data, stages it in MySQL, and transforms it into a Star Schema in PostgreSQL for high-performance analytics. Orchestrated by **Apache Airflow**.
 
-## 🚀 Project Overview
+## Project Overview
 
 This project implements a **Modern Data Stack (MDS)** to analyze flight prices. It simulates a production-grade data engineering workflow where raw data is ingested, staged, and then transformed into a dimensional model suitable for Business Intelligence (BI) tools.
 
@@ -16,7 +16,7 @@ This project implements a **Modern Data Stack (MDS)** to analyze flight prices. 
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 The pipeline follows a linear data flow orchestrated by the `flight_price_pipeline` DAG.
 
@@ -38,7 +38,7 @@ The Airflow DAG consists of two primary PythonOperator tasks:
 
 ---
 
-## 💾 Database Schema (Star Schema)
+## Database Schema (Star Schema)
 
 The Analytics layer in PostgreSQL is designed as a **Star Schema** to optimize read performance for analytical queries.
 
@@ -89,7 +89,7 @@ erDiagram
 
 ---
 
-## 📊 Data Insights & Visualizations
+## Data Insights & Visualizations
 
 The pipeline feeds into a BI dashboard that tracks key metrics such as average fare by airline, booking trends, and route popularity.
 
@@ -179,7 +179,7 @@ The pipeline feeds into a BI dashboard that tracks key metrics such as average f
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```bash
 ├── dags/
